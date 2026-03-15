@@ -1,0 +1,251 @@
+name: Build & Release DoliMac
+
+# ─────────────────────────────────────────────────────────────
+# Déclencheurs
+# ─────────────────────────────────────────────────────────────
+on:
+  push:
+    tags:
+      - 'v*.*.*'          # Ex : v1.0.0, v1.2.3-beta
+  workflow_dispatch:       # Déclenchement manuel depuis GitHub UI
+    inputs:
+      draft:
+        description: 'Publier comme brouillon ?'
+        type: boolean
+        default: true
+
+# ─────────────────────────────────────────────────────────────
+# Permissions
+# ─────────────────────────────────────────────────────────────
+permissions:
+  contents: write          # Nécessaire pour créer la Release
+
+# ─────────────────────────────────────────────────────────────
+# Variables globales
+# ─────────────────────────────────────────────────────────────
+env:
+  APP_NAME:       "DoliMac"
+  BUNDLE_NAME:    "DoliMac.app"
+  DMG_NAME:       "DoliMac-macOS.dmg"
+  CHECKSUM_FILE:  "DoliMac-macOS.dmg.sha256"
+  BUILD_DIR:      ".build/release"
+  DIST_DIR:       "dist"
+
+jobs:
+  # ───────────────────────────────────────────────────────────
+  # Job 1 — Build
+  # ───────────────────────────────────────────────────────────
+  build:
+    name: Build DoliMac (Apple Silicon)
+    runs-on: macos-14          # Macos 14 = runner Apple Silicon (M1)
+
+    steps:
+      # 1. Checkout
+      - name: Checkout du code source
+        uses: actions/checkout@v4
+
+      # 2. Vérification de l'environnement
+      - name: Informations système
+        run: |
+          echo "=== macOS ===" && sw_vers
+          echo "=== Swift ===" && swift --version
+          echo "=== Xcode ===" && xcodebuild -version
+          echo "=== Architecture ===" && uname -m
+
+      # 3. Cache des artefacts Swift
+      - name: Cache Swift Package Manager
+        uses: actions/cache@v4
+        with:
+          path: |
+            .build/checkouts
+            .build/repositories
+          key: ${{ runner.os }}-spm-${{ hashFiles('Package.swift', 'Package.resolved') }}
+          restore-keys: |
+            ${{ runner.os }}-spm-
+
+      # 4. Compilation release arm64
+      - name: Compilation Swift (release, arm64)
+        run: |
+          swift build \
+            -c release \
+            --arch arm64 \
+            2>&1 | tee build.log
+
+          # Vérifier que le binaire existe
+          if [ ! -f "$BUILD_DIR/$APP_NAME" ]; then
+            echo "::error::Binaire introuvable après compilation"
+            cat build.log
+            exit 1
+          fi
+          echo "✓ Binaire compilé : $(du -sh $BUILD_DIR/$APP_NAME | cut -f1)"
+
+      # 5. Création du .app bundle
+      - name: Création du .app bundle
+        run: |
+          APP_BUNDLE="$BUILD_DIR/$BUNDLE_NAME"
+          mkdir -p "$APP_BUNDLE/Contents/MacOS"
+          mkdir -p "$APP_BUNDLE/Contents/Resources"
+
+          # Binaire principal
+          cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+          chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+          # Info.plist
+          cp Resources/Info.plist "$APP_BUNDLE/Contents/Info.plist"
+
+          # Icône (optionnelle)
+          if [ -f "Resources/AppIcon.icns" ]; then
+            cp Resources/AppIcon.icns "$APP_BUNDLE/Contents/Resources/"
+            echo "✓ Icône incluse"
+          else
+            echo "⚠ Pas d'icône (Resources/AppIcon.icns manquant)"
+          fi
+
+          # Désinstallateur (app séparée dans le DMG)
+          if [ -f "$BUILD_DIR/DoliMacUninstaller" ]; then
+            UNI_BUNDLE="$BUILD_DIR/DoliMacUninstaller.app"
+            mkdir -p "$UNI_BUNDLE/Contents/MacOS"
+            cp "$BUILD_DIR/DoliMacUninstaller" "$UNI_BUNDLE/Contents/MacOS/"
+            chmod +x "$UNI_BUNDLE/Contents/MacOS/DoliMacUninstaller"
+          fi
+
+          echo "✓ Bundle créé : $APP_BUNDLE"
+
+      # 6. Création du DMG
+      - name: Création du DMG
+        run: |
+          mkdir -p "$DIST_DIR"
+          rm -rf /tmp/dmg-staging
+          mkdir -p /tmp/dmg-staging
+
+          # App principale
+          cp -R "$BUILD_DIR/$BUNDLE_NAME" "/tmp/dmg-staging/$BUNDLE_NAME"
+
+          # Désinstallateur (si compilé)
+          if [ -d "$BUILD_DIR/DoliMacUninstaller.app" ]; then
+            cp -R "$BUILD_DIR/DoliMacUninstaller.app" "/tmp/dmg-staging/DoliMac Uninstaller.app"
+          fi
+
+          # Lien /Applications
+          ln -s /Applications /tmp/dmg-staging/Applications
+
+          # Créer le DMG compressé
+          hdiutil create \
+            -volname "DoliMac" \
+            -srcfolder /tmp/dmg-staging \
+            -ov \
+            -format UDZO \
+            -imagekey zlib-level=9 \
+            "$DIST_DIR/$DMG_NAME"
+
+          rm -rf /tmp/dmg-staging
+          echo "✓ DMG : $(du -sh $DIST_DIR/$DMG_NAME | cut -f1)"
+
+      # 7. Génération du checksum SHA-256
+      - name: Génération du checksum SHA-256
+        run: |
+          cd "$DIST_DIR"
+
+          # SHA-256 (format standard : hash  filename)
+          shasum -a 256 "$DMG_NAME" > "$CHECKSUM_FILE"
+
+          # Affichage pour les logs CI
+          echo "=== Checksum SHA-256 ==="
+          cat "$CHECKSUM_FILE"
+
+          # Extraction du hash seul (pour les étapes suivantes)
+          HASH=$(shasum -a 256 "$DMG_NAME" | awk '{print $1}')
+          echo "DMG_SHA256=$HASH" >> "$GITHUB_ENV"
+          echo "✓ SHA-256 : $HASH"
+
+      # 8. Upload des artefacts (disponibles dans l'UI GitHub Actions)
+      - name: Upload des artefacts de build
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolimac-build-${{ github.sha }}
+          path: |
+            dist/DoliMac-macOS.dmg
+            dist/DoliMac-macOS.dmg.sha256
+          retention-days: 30
+
+      # 9. Création de la GitHub Release (uniquement sur tag v*)
+      - name: Création de la GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "DoliMac ${{ github.ref_name }}"
+          draft: ${{ github.event.inputs.draft == 'true' || false }}
+          prerelease: ${{ contains(github.ref_name, '-beta') || contains(github.ref_name, '-rc') }}
+          body: |
+            ## DoliMac ${{ github.ref_name }}
+
+            Application macOS native pour gérer Dolibarr ERP via la barre de menu.
+
+            ### 📥 Installation
+
+            1. Télécharger `DoliMac-macOS.dmg`
+            2. Ouvrir le DMG et glisser **DoliMac** dans `/Applications`
+            3. Premier lancement → autoriser dans **Réglages → Confidentialité et sécurité**
+
+            > **Note :** L'app n'est pas signée Apple Developer ID.
+            > Si macOS bloque le lancement, ouvrir un Terminal et exécuter :
+            > ```bash
+            > xattr -cr /Applications/DoliMac.app
+            > ```
+
+            ### 🔒 Vérification de l'intégrité
+
+            Avant d'installer, vérifiez que le DMG n'a pas été altéré :
+
+            ```bash
+            # Télécharger le fichier .sha256 puis vérifier :
+            shasum -a 256 -c DoliMac-macOS.dmg.sha256
+            # Résultat attendu : DoliMac-macOS.dmg: OK
+            ```
+
+            **SHA-256 :** `${{ env.DMG_SHA256 }}`
+
+            ### ⚙️ Configuration requise
+
+            - macOS 13 Ventura ou supérieur
+            - Apple Silicon (M1 / M2 / M3)
+            - Connexion internet (installation initiale uniquement)
+
+            ### 🗑 Désinstallation
+
+            Utiliser **DoliMac Uninstaller.app** inclus dans le DMG.
+
+          files: |
+            dist/DoliMac-macOS.dmg
+            dist/DoliMac-macOS.dmg.sha256
+
+  # ───────────────────────────────────────────────────────────
+  # Job 2 — Vérification du checksum (intégrité post-upload)
+  # ───────────────────────────────────────────────────────────
+  verify:
+    name: Vérification de l'intégrité du DMG
+    needs: build
+    runs-on: macos-14
+
+    steps:
+      - name: Téléchargement de l'artefact
+        uses: actions/download-artifact@v4
+        with:
+          name: dolimac-build-${{ github.sha }}
+          path: dist/
+
+      - name: Vérification du SHA-256
+        run: |
+          cd dist
+          echo "=== Fichiers disponibles ==="
+          ls -lh
+
+          echo "=== Vérification de l'intégrité ==="
+          shasum -a 256 -c DoliMac-macOS.dmg.sha256
+
+          if [ $? -eq 0 ]; then
+            echo "✓ Intégrité vérifiée — le DMG n'a pas été altéré"
+          else
+            echo "::error::Échec de la vérification SHA-256 !"
+            exit 1
+          fi
