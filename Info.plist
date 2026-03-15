@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>com.dolibarr.DolibarrBar</string>
+    <key>CFBundleName</key>
+    <string>DolibarrBar</string>
+    <key>CFBundleDisplayName</key>
+    <string>Dolibarr</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>DolibarrBar</string>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <!-- Pas d'icône dans le Dock -->
+    <key>LSUIElement</key>
+    <true/>
+    <!-- Permissions réseau (pour télécharger Dolibarr) -->
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsArbitraryLoads</key>
+        <true/>
+    </dict>
+    <!-- Apple Silicon uniquement -->
+    <key>LSMinimumSystemVersion</key>
+    <string>13.0</string>
+</dict>
+</plist>
