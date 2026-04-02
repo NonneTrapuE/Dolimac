@@ -2,14 +2,14 @@
 import PackageDescription
 
 let package = Package(
-    name: "DolibarrBar",
+    name: "DoliMac",
     platforms: [
         .macOS(.v13)
     ],
     targets: [
         .executableTarget(
-            name: "DolibarrBar",
-            path: "Sources/DolibarrBar",
+            name: "DoliMac",
+            path: "Sources/DoliMac",
             resources: [
                 .process("../../Resources/Info.plist")
             ]
