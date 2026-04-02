@@ -5,7 +5,7 @@
     <key>CFBundleIdentifier</key>
     <string>com.dolibarr.DolibarrBar</string>
     <key>CFBundleName</key>
-    <string>DolibarrBar</string>
+    <string>DoliMac</string>
     <key>CFBundleDisplayName</key>
     <string>Dolibarr</string>
     <key>CFBundleShortVersionString</key>
@@ -15,7 +15,7 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleExecutable</key>
-    <string>DolibarrBar</string>
+    <string>DoliMac</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
     <!-- Pas d'icône dans le Dock -->
