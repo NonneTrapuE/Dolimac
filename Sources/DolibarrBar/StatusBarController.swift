@@ -259,7 +259,7 @@ class StatusBarController: NSObject {
             let err = NSAlert()
             err.alertStyle      = .critical
             err.messageText     = "Fichier de sauvegarde invalide"
-            err.informativeText = reason
+            err.informativeText = reason.message  // FIX : reason est un BackupError, pas un String
             err.runModal()
             return
 
