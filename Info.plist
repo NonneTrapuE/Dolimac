@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleIdentifier</key>
-    <string>com.dolibarr.DolibarrBar</string>
+    <string>com.dolibarr.DoliMac</string>
     <key>CFBundleName</key>
     <string>DoliMac</string>
     <key>CFBundleDisplayName</key>
