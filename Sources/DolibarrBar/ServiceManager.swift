@@ -107,7 +107,7 @@ class DolibarrServiceManager: ObservableObject {
 
     func refreshStatus() {
         DispatchQueue.global(qos: .background).async {
-            let phpVer   = AppState.shared.phpVersion
+            // FIX : suppression de la variable phpVer inutilisée (warning ligne 110)
             let phpRes   = self.run(["pgrep", "-f", "php-fpm: master"])
             let mariaRes = self.run([self.brewBin, "services", "list"])
 
@@ -571,16 +571,24 @@ class DolibarrServiceManager: ObservableObject {
         let sizeKB:           Int
     }
 
+    // FIX : type d'erreur dédié conforme au protocole Error
+    // (remplace l'usage de String comme Failure dans Result<>)
+    struct BackupError: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
     /// Pré-analyse une sauvegarde avant restauration.
     /// Retourne le SQL décompressé + le résultat de compatibilité
     /// sans effectuer la restauration.
-    func analyzeBackup(at path: String) -> Result<RestoreAnalysis, String> {
+    // FIX : Result<RestoreAnalysis, String> → Result<RestoreAnalysis, BackupError>
+    func analyzeBackup(at path: String) -> Result<RestoreAnalysis, BackupError> {
         guard let compressed = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
-            return .failure("Fichier introuvable ou illisible")
+            return .failure(BackupError(message: "Fichier introuvable ou illisible"))
         }
         guard let data = try? (compressed as NSData).decompressed(using: .zlib),
               let sql  = String(data: data as Data, encoding: .utf8) else {
-            return .failure("Impossible de décompresser l'archive (format non reconnu)")
+            return .failure(BackupError(message: "Impossible de décompresser l'archive (format non reconnu)"))
         }
 
         let compat      = checkBackupCompatibility(at: path)
@@ -612,8 +620,9 @@ class DolibarrServiceManager: ObservableObject {
         // 1. Pré-analyse
         let analysisResult = analyzeBackup(at: path)
         switch analysisResult {
+        // FIX : reason est maintenant un BackupError, on accède à reason.message
         case .failure(let reason):
-            onLine("✗ Erreur : \(reason)")
+            onLine("✗ Erreur : \(reason.message)")
             completion(false)
             return
         case .success(let analysis):
@@ -654,7 +663,8 @@ class DolibarrServiceManager: ObservableObject {
             onLine("Restauration de \(analysis.sizeKB) Ko dans '\(st.dbName)'…")
             let tmpSQL = "/tmp/dolibarr_restore_\(Int(Date().timeIntervalSince1970)).sql"
             do {
-                try analysis.sql.write(toFile: tmpSQL, atomically: true, encoding: .utf8)
+                // FIX : String.Encoding.utf8 explicite (résout l'ambiguïté de .utf8 en cascade)
+                try analysis.sql.write(toFile: tmpSQL, atomically: true, encoding: String.Encoding.utf8)
             } catch {
                 onLine("✗ Erreur écriture fichier temporaire : \(error.localizedDescription)")
                 completion(false)
