@@ -432,7 +432,7 @@ struct InstallStepView: View {
     private func advance(by weight: Double, label: String) {
         DispatchQueue.main.async {
             withAnimation(.easeInOut(duration: 0.4)) {
-                progress   = min(progress + weight, 1.0)
+                progress    = min(progress + weight, 1.0)
                 currentTask = label
             }
         }
@@ -489,26 +489,39 @@ struct InstallStepView: View {
         }
     }
 
+    // FIX : démarrage des services après l'installation de Dolibarr
     private func installStep_Dolibarr() {
         if manager.isDolibarrInstalled() {
             log("✓ Dolibarr déjà présent, mise à jour…")
         }
         manager.installDolibarr(onLine: log) { ok in
-            if ok {
-                self.advance(by: 0.30, label: "Dolibarr installé")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    AppState.shared.isInstalled = true
-                    self.isRunning = false
-                    self.onComplete()
+            guard ok else { self.fail(); return }
+
+            self.advance(by: 0.30, label: "Dolibarr installé")
+
+            // Démarrage des services une fois l'installation terminée
+            self.log("Démarrage des services…")
+            self.manager.startServices(onLine: self.log) { started in
+                DispatchQueue.main.async {
+                    if !started {
+                        // Non bloquant : l'utilisateur peut démarrer manuellement
+                        self.log("⚠ Les services n'ont pas démarré automatiquement.")
+                        self.log("  Utilisez le menu DoliMac pour les démarrer.")
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                        AppState.shared.isInstalled = true
+                        self.isRunning = false
+                        self.onComplete()
+                    }
                 }
-            } else { self.fail() }
+            }
         }
     }
 
     private func fail() {
         DispatchQueue.main.async {
-            failed    = true
-            isRunning = false
+            failed      = true
+            isRunning   = false
             currentTask = "Échec — consultez les logs"
         }
     }
