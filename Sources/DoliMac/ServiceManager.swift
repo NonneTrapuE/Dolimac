@@ -107,7 +107,7 @@ class DolibarrServiceManager: ObservableObject {
 
     func refreshStatus() {
         DispatchQueue.global(qos: .background).async {
-            // FIX : suppression de la variable phpVer inutilisée (warning ligne 110)
+            // FIX : suppression de la variable phpVer inutilisée
             let phpRes   = self.run(["pgrep", "-f", "php-fpm: master"])
             let mariaRes = self.run([self.brewBin, "services", "list"])
 
@@ -123,20 +123,31 @@ class DolibarrServiceManager: ObservableObject {
 
     // MARK: - Démarrage / Arrêt
 
+    // FIX : démarre MariaDB via Homebrew + serveur PHP built-in via LaunchAgent.
+    // L'ancienne version démarrait php-fpm qui nécessite un reverse proxy (nginx/apache)
+    // pour servir HTTP. Le serveur built-in PHP suffit pour Dolibarr en local.
     func startServices(onLine: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
-        let phpVer = state.phpVersion
+        // 1. Démarrer MariaDB
         runStreaming([brewBin, "services", "start", "mariadb"], onLine: onLine) { ok in
-            guard ok else { completion(false); return }
-            self.runStreaming([self.brewBin, "services", "start", "php@\(phpVer)"], onLine: onLine) { ok2 in
+            guard ok else {
+                onLine("Erreur : impossible de démarrer MariaDB")
+                completion(false)
+                return
+            }
+            // 2. Démarrer le serveur PHP built-in via LaunchAgent
+            self.startPhpServer { ok2 in
                 self.refreshStatus()
+                onLine(ok2 ? "✓ Serveur PHP démarré" : "Erreur : impossible de démarrer le serveur PHP")
                 completion(ok2)
             }
         }
     }
 
+    // FIX : arrête PHP built-in puis MariaDB
     func stopServices(onLine: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
-        let phpVer = state.phpVersion
-        runStreaming([brewBin, "services", "stop", "php@\(phpVer)"], onLine: onLine) { _ in
+        // 1. Arrêter le serveur PHP built-in
+        stopPhpServer { _ in
+            // 2. Arrêter MariaDB
             self.runStreaming([self.brewBin, "services", "stop", "mariadb"], onLine: onLine) { ok in
                 self.refreshStatus()
                 completion(ok)
@@ -179,7 +190,6 @@ class DolibarrServiceManager: ObservableObject {
         let phpVer = state.phpVersion
         runStreaming([brewBin, "install", "php@\(phpVer)"], onLine: onLine) { ok in
             guard ok else { completion(false); return }
-            // Activer les extensions utiles pour Dolibarr
             let phpIni = "\(self.brewPrefix)/etc/php/\(phpVer)/php.ini"
             let extensions = "extension=gd\nextension=intl\nextension=mbstring\nextension=pdo_mysql\n"
             try? extensions.appendLine(to: phpIni)
@@ -190,9 +200,7 @@ class DolibarrServiceManager: ObservableObject {
     func installMariaDB(onLine: @escaping (String) -> Void, completion: @escaping (Bool) -> Void) {
         runStreaming([brewBin, "install", "mariadb"], onLine: onLine) { ok in
             guard ok else { completion(false); return }
-            // Démarrer MariaDB pour initialiser la BDD
             self.runStreaming([self.brewBin, "services", "start", "mariadb"], onLine: onLine) { _ in
-                // Attendre que MariaDB soit prêt
                 Thread.sleep(forTimeInterval: 3)
                 self.setupDatabase(onLine: onLine, completion: completion)
             }
@@ -218,7 +226,6 @@ class DolibarrServiceManager: ObservableObject {
             let path = st.dolibarrPath
             let fm   = FileManager.default
 
-            // 1. Récupérer la dernière version depuis GitHub
             DispatchQueue.main.async { onLine("Récupération de la dernière version de Dolibarr…") }
             let apiResult = self.run(["curl", "-fsSL",
                 "https://api.github.com/repos/Dolibarr/dolibarr/releases/latest"])
@@ -245,7 +252,6 @@ class DolibarrServiceManager: ObservableObject {
                 return
             }
 
-            // 2. Décompresser
             DispatchQueue.main.async { onLine("Décompression de l'archive…") }
             try? fm.removeItem(atPath: tmpDir)
             let tarResult = self.run(["tar", "-xzf", tmpTar, "-C", "/tmp"])
@@ -254,7 +260,6 @@ class DolibarrServiceManager: ObservableObject {
                 return
             }
 
-            // 3. Déplacer vers le répertoire cible
             DispatchQueue.main.async { onLine("Installation dans \(path)…") }
             try? fm.removeItem(atPath: path)
             let srcDir = "/tmp/dolibarr-\(version)"
@@ -265,19 +270,14 @@ class DolibarrServiceManager: ObservableObject {
                 return
             }
 
-            // 4. Créer les dossiers nécessaires
-            let dirs = [
-                "\(path)/documents",
-                "\(path)/htdocs/conf"
-            ]
+            let dirs = ["\(path)/documents", "\(path)/htdocs/conf"]
             for dir in dirs {
                 try? fm.createDirectory(atPath: dir, withIntermediateDirectories: true)
             }
 
-            // 5. Créer conf.php
             DispatchQueue.main.async { onLine("Écriture de la configuration…") }
-            let phpVer   = st.phpVersion
-            let phpBin   = "\(self.brewPrefix)/opt/php@\(phpVer)/bin/php"
+            let phpVer = st.phpVersion
+            let phpBin = "\(self.brewPrefix)/opt/php@\(phpVer)/bin/php"
             let confContent = """
             <?php
             $dolibarr_main_url_root          = 'http://localhost:\(st.dolibarrPort)';
@@ -301,7 +301,6 @@ class DolibarrServiceManager: ObservableObject {
             """
             try? confContent.write(toFile: st.doliconfPath, atomically: true, encoding: .utf8)
 
-            // 6. Configurer PHP-FPM + caddy/nginx léger via PHP built-in server
             DispatchQueue.main.async { onLine("Configuration du serveur PHP…") }
             self.writePhpServerLaunchAgent(phpBin: phpBin, dolibarrPath: path, port: st.dolibarrPort)
 
@@ -312,10 +311,10 @@ class DolibarrServiceManager: ObservableObject {
         }
     }
 
-    /// Crée un LaunchAgent pour démarrer le serveur PHP au login
+    /// Crée un LaunchAgent pour le serveur PHP built-in
     private func writePhpServerLaunchAgent(phpBin: String, dolibarrPath: String, port: Int) {
-        let label   = "com.dolibarr.phpserver"
-        let plist   = """
+        let label = "com.dolibarr.phpserver"
+        let plist = """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
             "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -405,8 +404,6 @@ class DolibarrServiceManager: ObservableObject {
             return
         }
 
-        // Préfixer le dump avec les métadonnées DoliMac (version, date, BDD).
-        // Cet en-tête est utilisé par checkBackupCompatibility() lors de la restauration.
         let installedVersion = readInstalledDolibarrVersion() ?? "inconnue"
         let header = """
         -- ============================================================
@@ -418,7 +415,6 @@ class DolibarrServiceManager: ObservableObject {
         """
         let fullSQL = header + dump.output
 
-        // Compresser avec zlib
         guard let data = fullSQL.data(using: .utf8) else {
             completion(false, ""); return
         }
@@ -434,22 +430,14 @@ class DolibarrServiceManager: ObservableObject {
 
     // MARK: - Vérification de compatibilité d'une sauvegarde
 
-    /// Résultat de la vérification de compatibilité.
     enum CompatibilityResult {
-        /// La sauvegarde est compatible (ou la version n'a pas pu être déterminée).
         case compatible(backupVersion: String?, installedVersion: String?)
-        /// Versions différentes — restauration risquée.
         case mismatch(backupVersion: String, installedVersion: String)
-        /// Sauvegarde d'une version majeure différente — restauration très risquée.
         case majorMismatch(backupVersion: String, installedVersion: String)
-        /// Impossible de lire / décompresser le fichier.
         case unreadable(reason: String)
     }
 
-    /// Décompresse et inspecte un fichier `.sql.gz` pour en extraire
-    /// la version de Dolibarr qui l'a produit, puis la compare à la version installée.
     func checkBackupCompatibility(at path: String) -> CompatibilityResult {
-        // 1. Lire et décompresser
         guard let compressed = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
             return .unreadable(reason: "Fichier introuvable ou illisible")
         }
@@ -458,41 +446,25 @@ class DolibarrServiceManager: ObservableObject {
             return .unreadable(reason: "Impossible de décompresser l'archive (format non reconnu)")
         }
 
-        // 2. Extraire la version depuis le dump SQL.
-        //    DoliMac écrit en en-tête : -- DoliMac backup v17.0.2
-        //    Dolibarr natif écrit dans llx_const :
-        //      INSERT INTO llx_const ... 'MAIN_VERSION_LAST_INSTALL','17.0.2'
-        let backupVersion = extractVersionFromSQL(sql)
-
-        // 3. Lire la version installée (fichier filefunc.lib.php)
+        let backupVersion    = extractVersionFromSQL(sql)
         let installedVersion = readInstalledDolibarrVersion()
 
-        // 4. Comparer
         guard let bv = backupVersion, let iv = installedVersion else {
-            // Impossible de comparer → on laisse passer avec avertissement
             return .compatible(backupVersion: backupVersion, installedVersion: installedVersion)
         }
 
         let bParts = bv.split(separator: ".").compactMap { Int($0) }
         let iParts = iv.split(separator: ".").compactMap { Int($0) }
 
-        // Majeure différente : bloquant
         if let bMajor = bParts.first, let iMajor = iParts.first, bMajor != iMajor {
             return .majorMismatch(backupVersion: bv, installedVersion: iv)
         }
-
-        // Mineure différente : avertissement
         if bv != iv {
             return .mismatch(backupVersion: bv, installedVersion: iv)
         }
-
         return .compatible(backupVersion: bv, installedVersion: iv)
     }
 
-    /// Cherche la version Dolibarr dans le contenu SQL brut.
-    /// Stratégie 1 — en-tête DoliMac : `-- DoliMac backup v17.0.2`
-    /// Stratégie 2 — dump natif Dolibarr : valeur de MAIN_VERSION_LAST_INSTALL dans llx_const
-    /// Stratégie 3 — commentaire mysqldump : `-- Dolibarr version: 17.0.2`
     private func extractVersionFromSQL(_ sql: String) -> String? {
         let patterns: [String] = [
             #"-- DoliMac backup v(\d+\.\d+(?:\.\d+)?)"#,
@@ -501,15 +473,12 @@ class DolibarrServiceManager: ObservableObject {
             #"'MAIN_VERSION_LAST_INSTALL'\s*,\s*'([0-9]+\.[0-9]+(?:\.[0-9]+)?)'"#,
         ]
 
-        // On n'inspecte que les 300 premières lignes et les lignes contenant les mots-clés
-        // pour éviter de parcourir plusieurs Mo de SQL.
         let relevantLines = sql
             .components(separatedBy: "\n")
             .prefix(300)
             .filter { $0.contains("DoliMac") || $0.contains("VERSION") || $0.contains("Dolibarr") }
             .joined(separator: "\n")
 
-        // Fallback : chercher dans tout le SQL si rien trouvé dans l'en-tête
         let searchTargets = [relevantLines, sql]
 
         for target in searchTargets {
@@ -521,18 +490,15 @@ class DolibarrServiceManager: ObservableObject {
                     return String(target[range])
                 }
             }
-            if target != sql { continue } // passe au fallback
+            if target != sql { continue }
             break
         }
         return nil
     }
 
-    /// Lit la version installée depuis `filefunc.lib.php` de Dolibarr
-    /// (constante `DOL_VERSION`) ou depuis `conf.php` en dernier recours.
     private func readInstalledDolibarrVersion() -> String? {
         let doliPath = AppState.shared.dolibarrPath
 
-        // Méthode 1 : constante DOL_VERSION dans filefunc.lib.php
         let libPath = "\(doliPath)/htdocs/core/lib/functions.lib.php"
         if let content = try? String(contentsOfFile: libPath, encoding: .utf8) {
             let pattern = #"define\s*\(\s*['"]DOL_VERSION['"]\s*,\s*['"]([0-9]+\.[0-9]+(?:\.[0-9]+)?)['"]\s*\)"#
@@ -543,7 +509,6 @@ class DolibarrServiceManager: ObservableObject {
             }
         }
 
-        // Méthode 2 : requête SQL directe dans llx_const
         let result = run([
             "\(brewPrefix)/bin/mariadb",
             "-u", AppState.shared.dbUser,
@@ -553,16 +518,12 @@ class DolibarrServiceManager: ObservableObject {
             "-e", "SELECT value FROM llx_const WHERE name='MAIN_VERSION_LAST_INSTALL' LIMIT 1;"
         ])
         let version = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
-        if result.success && !version.isEmpty {
-            return version
-        }
-
+        if result.success && !version.isEmpty { return version }
         return nil
     }
 
     // MARK: - Restauration (avec vérification de compatibilité)
 
-    /// Résultat intermédiaire de l'analyse avant restauration.
     struct RestoreAnalysis {
         let sql:              String
         let compatibility:    CompatibilityResult
@@ -572,15 +533,11 @@ class DolibarrServiceManager: ObservableObject {
     }
 
     // FIX : type d'erreur dédié conforme au protocole Error
-    // (remplace l'usage de String comme Failure dans Result<>)
     struct BackupError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
     }
 
-    /// Pré-analyse une sauvegarde avant restauration.
-    /// Retourne le SQL décompressé + le résultat de compatibilité
-    /// sans effectuer la restauration.
     // FIX : Result<RestoreAnalysis, String> → Result<RestoreAnalysis, BackupError>
     func analyzeBackup(at path: String) -> Result<RestoreAnalysis, BackupError> {
         guard let compressed = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
@@ -591,10 +548,10 @@ class DolibarrServiceManager: ObservableObject {
             return .failure(BackupError(message: "Impossible de décompresser l'archive (format non reconnu)"))
         }
 
-        let compat      = checkBackupCompatibility(at: path)
-        let bVersion    = extractVersionFromSQL(sql)
-        let iVersion    = readInstalledDolibarrVersion()
-        let sizeKB      = data.count / 1024
+        let compat   = checkBackupCompatibility(at: path)
+        let bVersion = extractVersionFromSQL(sql)
+        let iVersion = readInstalledDolibarrVersion()
+        let sizeKB   = data.count / 1024
 
         return .success(RestoreAnalysis(
             sql:              sql,
@@ -605,9 +562,6 @@ class DolibarrServiceManager: ObservableObject {
         ))
     }
 
-    /// Restaure la base de données depuis un fichier `.sql.gz`.
-    /// Effectue une vérification de compatibilité et refuse la restauration
-    /// si les versions majeures sont incompatibles (sauf si `force: true`).
     func restoreDatabase(
         from path: String,
         force: Bool = false,
@@ -617,16 +571,15 @@ class DolibarrServiceManager: ObservableObject {
         let st = AppState.shared
         onLine("Décompression et analyse de la sauvegarde…")
 
-        // 1. Pré-analyse
         let analysisResult = analyzeBackup(at: path)
         switch analysisResult {
-        // FIX : reason est maintenant un BackupError, on accède à reason.message
+        // FIX : reason est un BackupError
         case .failure(let reason):
             onLine("✗ Erreur : \(reason.message)")
             completion(false)
             return
+
         case .success(let analysis):
-            // 2. Vérification de compatibilité
             switch analysis.compatibility {
             case .unreadable(let reason):
                 onLine("✗ Sauvegarde illisible : \(reason)")
@@ -638,9 +591,7 @@ class DolibarrServiceManager: ObservableObject {
                     onLine("✗ Incompatibilité majeure détectée :")
                     onLine("    Version sauvegarde  : \(bv)")
                     onLine("    Version installée   : \(iv)")
-                    onLine("  La restauration entre versions majeures différentes")
-                    onLine("  peut corrompre la base. Lancez la restauration avec")
-                    onLine("  'Forcer la restauration' pour ignorer cet avertissement.")
+                    onLine("  Lancez la restauration avec 'Forcer' pour ignorer.")
                     completion(false)
                     return
                 }
@@ -659,11 +610,10 @@ class DolibarrServiceManager: ObservableObject {
                 }
             }
 
-            // 3. Restauration effective
             onLine("Restauration de \(analysis.sizeKB) Ko dans '\(st.dbName)'…")
             let tmpSQL = "/tmp/dolibarr_restore_\(Int(Date().timeIntervalSince1970)).sql"
             do {
-                // FIX : String.Encoding.utf8 explicite (résout l'ambiguïté de .utf8 en cascade)
+                // FIX : String.Encoding.utf8 explicite
                 try analysis.sql.write(toFile: tmpSQL, atomically: true, encoding: String.Encoding.utf8)
             } catch {
                 onLine("✗ Erreur écriture fichier temporaire : \(error.localizedDescription)")
